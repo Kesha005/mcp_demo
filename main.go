@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
+	
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -205,52 +205,7 @@ func main() {
 		return mcp.NewToolResultText("task deleted"), nil
 	})
 
-	// ---------- FILE TOOLS (base64) ----------
 
-	saveFile := mcp.NewTool("save_file",
-		mcp.WithDescription("Save a file on the server. Use encoding=base64 for binary files (max 5 MB)."),
-		mcp.WithString("filename", mcp.Required(), mcp.Description("File name, e.g. report.txt")),
-		mcp.WithString("content", mcp.Required(), mcp.Description("File content")),
-		mcp.WithString("encoding", mcp.Description("text (default) or base64")),
-	)
-	s.AddTool(saveFile, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := req.GetArguments()
-		filename, _ := args["filename"].(string)
-		content, _ := args["content"].(string)
-		encoding, _ := args["encoding"].(string)
-
-		name, ok := safeName(filename)
-		if !ok {
-			return mcp.NewToolResultError("invalid filename"), nil
-		}
-		if content == "" {
-			return mcp.NewToolResultError("content is required"), nil
-		}
-
-		data := []byte(content)
-		if encoding == "base64" {
-			decoded, err := base64.StdEncoding.DecodeString(content)
-			if err != nil {
-				return mcp.NewToolResultError("invalid base64 content"), nil
-			}
-			data = decoded
-		}
-		if len(data) > maxFileSize {
-			return mcp.NewToolResultError("file too large (max 5 MB)"), nil
-		}
-
-		if err := os.MkdirAll(filesDir, 0o755); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		if err := os.WriteFile(filepath.Join(filesDir, name), data, 0o644); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		return jsonResult(map[string]any{
-			"filename": name,
-			"size":     len(data),
-			"saved_at": time.Now().UTC().Format(time.RFC3339),
-		})
-	})
 
 	listFiles := mcp.NewTool("list_files",
 		mcp.WithDescription("List files saved on the server"),

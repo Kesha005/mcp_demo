@@ -2,13 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"mcp_demo/store"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+)
+
+const (
+	filesDir    = "./uploads"
+	maxFileSize = 5 << 20 // 5 MB
 )
 
 func main() {
@@ -146,10 +156,130 @@ func main() {
 		return mcp.NewToolResultText("task deleted"), nil
 	})
 
+	// ---------- FILE TOOLS ----------
+
+	// save_file
+	saveFile := mcp.NewTool("save_file",
+		mcp.WithDescription("Save a file on the server. Use encoding=base64 for binary files (max 5 MB)."),
+		mcp.WithString("filename", mcp.Required(), mcp.Description("File name, e.g. report.txt")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("File content")),
+		mcp.WithString("encoding", mcp.Description("text (default) or base64")),
+	)
+	s.AddTool(saveFile, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		filename, _ := args["filename"].(string)
+		content, _ := args["content"].(string)
+		encoding, _ := args["encoding"].(string)
+
+		name, ok := safeName(filename)
+		if !ok {
+			return mcp.NewToolResultError("invalid filename"), nil
+		}
+		if content == "" {
+			return mcp.NewToolResultError("content is required"), nil
+		}
+
+		data := []byte(content)
+		if encoding == "base64" {
+			decoded, err := base64.StdEncoding.DecodeString(content)
+			if err != nil {
+				return mcp.NewToolResultError("invalid base64 content"), nil
+			}
+			data = decoded
+		}
+		if len(data) > maxFileSize {
+			return mcp.NewToolResultError("file too large (max 5 MB)"), nil
+		}
+
+		if err := os.MkdirAll(filesDir, 0o755); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if err := os.WriteFile(filepath.Join(filesDir, name), data, 0o644); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return jsonResult(map[string]any{
+			"filename": name,
+			"size":     len(data),
+			"saved_at": time.Now().UTC().Format(time.RFC3339),
+		})
+	})
+
+	// list_files
+	listFiles := mcp.NewTool("list_files",
+		mcp.WithDescription("List files saved on the server"),
+	)
+	s.AddTool(listFiles, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		out := []map[string]any{}
+		entries, err := os.ReadDir(filesDir)
+		if err != nil && !os.IsNotExist(err) {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			out = append(out, map[string]any{
+				"filename": e.Name(),
+				"size":     info.Size(),
+				"saved_at": info.ModTime().UTC().Format(time.RFC3339),
+			})
+		}
+		return jsonResult(out)
+	})
+
+	// get_file (text files only)
+	getFile := mcp.NewTool("get_file",
+		mcp.WithDescription("Read a saved file as text"),
+		mcp.WithString("filename", mcp.Required(), mcp.Description("File name")),
+	)
+	s.AddTool(getFile, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, _ := req.GetArguments()["filename"].(string)
+		name, ok := safeName(filename)
+		if !ok {
+			return mcp.NewToolResultError("invalid filename"), nil
+		}
+		data, err := os.ReadFile(filepath.Join(filesDir, name))
+		if err != nil {
+			return mcp.NewToolResultError("file not found"), nil
+		}
+		return mcp.NewToolResultText(string(data)), nil
+	})
+
+	// delete_file
+	deleteFile := mcp.NewTool("delete_file",
+		mcp.WithDescription("Delete a saved file"),
+		mcp.WithString("filename", mcp.Required(), mcp.Description("File name")),
+	)
+	s.AddTool(deleteFile, func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filename, _ := req.GetArguments()["filename"].(string)
+		name, ok := safeName(filename)
+		if !ok {
+			return mcp.NewToolResultError("invalid filename"), nil
+		}
+		if err := os.Remove(filepath.Join(filesDir, name)); err != nil {
+			return mcp.NewToolResultError("file not found"), nil
+		}
+		return mcp.NewToolResultText("file deleted"), nil
+	})
+
 	log.Println("🚀 MCP server starting on stdio...")
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// safeName strips any directory part and rejects empty or hidden names,
+// so a client can't write outside the uploads directory.
+func safeName(filename string) (string, bool) {
+	name := filepath.Base(strings.TrimSpace(filename))
+	if name == "" || name == "." || name == ".." || name == string(filepath.Separator) || strings.HasPrefix(name, ".") {
+		return "", false
+	}
+	return name, true
 }
 
 // jsonResult marshals v to JSON and wraps it as a tool result.
